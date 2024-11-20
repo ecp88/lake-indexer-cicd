@@ -1,6 +1,6 @@
-- Near Lake deployment instructions \*
+# Near Lake deployment instructions
 
-When to update?
+## When to update?
 
 There is no simple answer. I recommend following the rules:
 
@@ -24,7 +24,7 @@ Pagoda maintainer performs terraform apply in the corresponding folder of the ne
 
 After some time (when new nodes catch up with the network according to the Grafana dashboard), the Pagoda maintainer deletes the leftover node from step 3 that was removed from the instance group
 
-** Pagoda maintainer instructions in detail **
+## Pagoda maintainer instructions in detail
 
 - Right now we use the Instance Group `testnet-lake-group-1` on GCP in the near-core project for the testnet, but the group name might change, keep that in mind.
 
