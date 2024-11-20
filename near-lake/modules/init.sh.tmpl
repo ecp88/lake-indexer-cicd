@@ -1,0 +1,98 @@
+#!/bin/bash
+# Initialization script for the RPC backup node.
+# Loop until we find the attached disk device, format and mount if necessary.
+# https://cloud.google.com/compute/docs/disks/add-persistent-disk#formatting
+set -exo pipefail
+
+NEAR_CHAIN_ID=${ chain_id }
+NEAR_ARCHIVE=${ archive }
+NEAR_LAKE_URL=${ near_lake_tar_gz_url }
+AWS_ACCESS_KEY_ID=${ aws_access_key_id }
+AWS_SECRET_ACCESS_KEY=${ aws_secret_access_key }
+echo $NEAR_CHAIN_ID
+echo $NEAR_ARCHIVE
+
+NEAR_DIR=/home/ubuntu/.near
+NEAR_DATA_DIR="$NEAR_DIR/data"
+NEAR_PATH=/home/ubuntu/near-lake
+
+#If already have $NEAR_DATA_DIR then initial setup was already done
+if [ -d "$NEAR_DATA_DIR"  ]; then
+  exit 0;
+fi
+
+if [[ -z "$NEAR_LAKE_URL" ]]; then
+  #Figure out which is current release for this chain
+  NEAR_LAKE_URL=$(curl --silent "https://api.github.com/repos/near/near-lake-indexer/releases/latest" | jq -r '.assets[0].browser_download_url')
+fi
+
+function initial_setup_data_disk {
+  # Ensure we can see the attached disk.
+  until ls /dev/sdb
+  do
+      echo "looking for /dev/sdb..."
+      sleep 1
+  done
+
+  # Format the device, if necessary.
+  until sudo file -s /dev/sdb | cut -d , -f1 | grep ext4
+  do
+      sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/sdb
+  done
+
+  # Ensure the disk is formatted.
+  until sudo file -s /dev/sdb | cut -d , -f1 | grep ext4
+  do
+      echo "Disk not formatted as ext4... exiting!"
+      exit 1
+  done
+  sudo fsck.ext4 -p /dev/sdb
+
+  # Create a mount point.
+  sudo mkdir -p $NEAR_DATA_DIR
+  # ... and mount.
+  sudo mount -o discard,defaults /dev/sdb $NEAR_DATA_DIR
+
+  sudo echo "/dev/sdb $NEAR_DATA_DIR ext4 discard,defaults,nofail 0 2" >> /etc/fstab
+
+  # Make ubuntu owner of near dir
+  sudo chown -R ubuntu $NEAR_DIR
+  sudo resize2fs /dev/sdb
+}
+
+function amazon_credentials {
+  sudo -u ubuntu echo "BUCKET=near-lake-data-$NEAR_CHAIN_ID" > /home/ubuntu/.env
+  sudo -u ubuntu echo "REGION=eu-central-1" >> /home/ubuntu/.env
+  sudo -u ubuntu echo "AWS_DEFAULT_REGION=eu-central-1" >> /home/ubuntu/.env
+  sudo -u ubuntu echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> /home/ubuntu/.env
+  sudo -u ubuntu echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> /home/ubuntu/.env
+  sudo chown -R ubuntu /home/ubuntu/.env
+}
+
+
+function initalize_near_config {
+  sudo -u ubuntu wget $NEAR_LAKE_URL -O $NEAR_PATH
+  sudo -u ubuntu chmod +x $NEAR_PATH
+
+  sudo -u ubuntu $NEAR_PATH init --chain-id $NEAR_CHAIN_ID --download-genesis
+
+  T=$(mktemp)
+  # Let's update few config values
+  # For using nginx proxy in between update from default 3030 which will be taken by nginx reverse proxy
+  # to 4040 where nginx will forward requests
+  # .rpc.addr = '0.0.0.0:4040'
+  # effort to exclude ansi coloring from the logs what messes with automated digestion of logs
+  # .log_summary_style = 'plain'
+  # Update (@khorolets): We don't use nginx on the near-lake-indexer-2204 image
+
+  jq '.rpc.addr="0.0.0.0:3030" | .log_summary_style="plain" | .store.col_state_cache_size=3536870912' < $NEAR_DIR/config.json |\
+	( [ "$NEAR_ARCHIVE" == "true" ] && jq '.archive=true' || cat ) >$T # Do we want an archival node or not
+  cat "$T" > $NEAR_DIR/config.json
+  rm "$T"
+
+  sudo systemctl start lake
+}
+
+amazon_credentials
+initial_setup_data_disk
+initalize_near_config
